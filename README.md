@@ -24,34 +24,40 @@ fail silently and the whole feature is skipped. Full details, including how
 this was confirmed against the real download.haiku-os.org nightly, are in
 [rwebpositive-arm64/AGENTS.md](https://github.com/rainygirl/haiku-rwebpositive-arm64/blob/main/AGENTS.md).
 
-## What this fixes, and what it does not
+## What this fixes -- all of it, as of the follow-up session
 
 Verified on a rebuild (2026-09-16): `add-ssl-arm64.sh` plus a `jam
 @minimum-mmc` rebuild produces a `haiku` package whose `libbnetapi.so` links
 `libssl.so.3`/`libcrypto.so.3`, and the finished image carries `openssl3`
-without any other change. Booted that image and confirmed the network stack
-completes a real TLS handshake and gets a real HTTP response back from both
-`eu.hpkg.haiku-os.org` and `raw.githubusercontent.com` -- **this part
-works.**
+without any other change.
 
-`pkgman add-repo` against either of those still fails, though, with
-`*** failed! : Operation not allowed`. That turned out not to be a
-networking failure at all: `B_NOT_ALLOWED` is exactly how
-`src/kits/package/FetchFileJob.cpp` reports an HTTP 403, 405 or 406 coming
-back from the server (confirmed by reading that file, not guessed) -- so the
-TLS connection succeeds and a real HTTP conversation happens, and the server
-is the one declining it. Ruled out along the way: DNS and IP connectivity
-both work fine (`ping`, DHCP), the guest's own user is already `uid=0`, so
-it is not a local file-permission problem, and the CA root certificate
-bundle being present or missing made no difference (installed it partway
-through and the failure was identical either way). What is actually being
-rejected, and by which side's header or default, has not been found -- this
-needs someone to read Haiku's HTTP client code (or capture the request on
-the wire) further than this session did. Until then, `pkgman` over the
-network is still not a working install path for WebPositive on arm64; see
+The first attempt at using it stalled on `pkgman add-repo` failing against
+every host tried -- `eu.hpkg.haiku-os.org`, `raw.githubusercontent.com`,
+plain `http://` -- with `*** failed! : Operation not allowed`, and a wrong
+turn chasing a server-side 403/405/406 theory (`B_NOT_ALLOWED` really is
+what `src/kits/package/FetchFileJob.cpp` returns for those, but a raw
+request replay via `curl` with Haiku's exact headers never reproduced the
+failure). The real cause, found by patching `SecureSocket.cpp`'s silently-
+swallowed `SSL_ERROR_SSL` case to print the underlying OpenSSL error before
+returning: `error:0A000086:SSL routines::certificate verify failed`. Not a
+network problem, not a missing trust store -- `openssl s_client -CAfile
+CARootCertificates.pem` against the same host gave `Verify return code: 9
+(certificate is not yet valid)`, and the guest's own `date` read
+`Thu Jan 1 00:04:30 GMT 1970`. The QEMU `virt` board's RTC is never read
+at boot, so every arm64 guest here starts at the Unix epoch, and no real
+certificate is valid yet by that clock. Setting the date by hand
+(`date MMDDhhmmYYYY`) made the exact same `add-repo` call succeed
+immediately.
+
+**So: this build patch is necessary but not sufficient on its own.**
+Anyone using it also needs the guest's clock set correctly before `pkgman`
+can reach anything over https -- check with `date`, fix it if it reads
+1970. With that done, `pkgman add-repo` and `pkgman install` both work
+completely; see
 [rwebpositive-arm64](https://github.com/rainygirl/haiku-rwebpositive-arm64)'s
-own `install-webpositive-arm64.sh` / `inject-webpositive-arm64.sh`, neither
-of which needs the guest to reach a network at all.
+README for the exact commands (and two more small, since-fixed snags on the
+repository side: a `repo.sha256` file next to the index, and every
+package's filename matching its own embedded version string exactly).
 
 ## Using it
 
